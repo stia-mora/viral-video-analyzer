@@ -35,7 +35,7 @@ export default function Settings({
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [key, setKey] = useState(""),
-    [test, setTest] = useState(""),
+    [test, setTest] = useState<{ ok: boolean; message: string } | null>(null),
     [cookie, setCookie] = useState(""),
     [platform, setPlatform] = useState("抖音");
   useEffect(() => {
@@ -216,7 +216,7 @@ export default function Settings({
                       const t = await post<{ ok: boolean; message: string }>(
                         "/settings/test",
                       );
-                      setTest(t.message);
+                      setTest(t);
                     } catch (e) {
                       setError((e as Error).message);
                     } finally {
@@ -229,8 +229,9 @@ export default function Settings({
                 </button>
               </div>
               {test && (
-                <p className="test-result" role="status">
-                  {test}
+                <p className={`test-result ${test.ok ? "ok" : "failed"}`} role="status">
+                  {test.ok ? <Check size={14} /> : null}
+                  {test.message}
                 </p>
               )}
             </div>

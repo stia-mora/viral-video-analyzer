@@ -97,6 +97,10 @@ def test_csrf_and_url_validation(client):
         normalize_url("复制链接 https://www.douyin.com/user/a?modal_id=12345 到浏览器")
         == "https://www.douyin.com/video/12345"
     )
+    shared = """0.53 12/07 odA:/ :9pm i\\@P.Kj 第1集：《东北妹子穿书恶毒女配，征服了韩国贵族学院》
+东北大妹子一觉醒来穿进韩国校园小说，还成了活不过三集的恶毒女配。
+#校园 #甜宠 [https://v.douyin.com/P88u4n8WnOs/](https://v.douyin.com/P88u4n8WnOs/) 复制此链接，打开Dou音搜索，直接观看视频！"""
+    assert normalize_url(shared) == "https://v.douyin.com/P88u4n8WnOs/"
 
 
 def test_unknown_metrics_and_zero_denominators():
@@ -168,6 +172,41 @@ def test_secrets_never_returned(client):
         },
     )
     assert store.setting("api_key") == "secret-test-key"
+
+
+def test_cloud_vlm_smoke_test_uses_multimodal_endpoint(client, monkeypatch):
+    login(client)
+    client.put("/api/settings", json={"team_name":"团队", "provider":"api", "base_url":"https://vision.example/v1", "model":"vision-model", "api_key":"secret-test-key"})
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": "OK"}}]}
+
+    captured = {}
+    def fake_post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return FakeResponse()
+    monkeypatch.setattr("httpx.post", fake_post)
+    response = client.post("/api/settings/test")
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["kind"] == "api"
+    assert captured["url"] == "https://vision.example/v1/chat/completions"
+    assert any(item["type"] == "image_url" for item in captured["json"]["messages"][0]["content"])
+    assert "secret-test-key" not in response.text
+
+
+def test_cloud_vlm_smoke_test_reports_errors(client, monkeypatch):
+    login(client)
+    client.put("/api/settings", json={"team_name":"团队", "provider":"api", "base_url":"https://vision.example/v1", "model":"vision-model", "api_key":"secret-test-key"})
+    class Response:
+        def __init__(self, code, body=None): self.status_code, self.body = code, body or {}
+        def json(self): return self.body
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Response(401))
+    assert "鉴权失败" in client.post("/api/settings/test").json()["message"]
+    monkeypatch.setattr("httpx.post", lambda *a, **k: Response(200, {"choices": []}))
+    assert "返回格式" in client.post("/api/settings/test").json()["message"]
 
 
 def test_password_change_invalidates_sessions(client):

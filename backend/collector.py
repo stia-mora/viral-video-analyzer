@@ -23,10 +23,13 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 
 
 def normalize_url(text):
-    match = re.search(r'https?://[^\s<>"，。]+', text)
+    # Stop at Markdown link delimiters as well as whitespace/punctuation.
+    match = re.search(r'https?://[^\s<>"\[\]()，。]+', text)
     if not match:
         raise ValueError("请粘贴包含 https:// 的视频链接或分享文案")
-    url = match.group(0).rstrip(".,;!）)")
+    # Shared posts are often pasted as Markdown links. Brackets are
+    # presentation syntax, not part of the URL.
+    url = match.group(0).rstrip(".,;!）)]}>")
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     if parsed.username or parsed.password or parsed.port not in (None, 443, 80):
@@ -41,6 +44,18 @@ def normalize_url(text):
         if video_id.isdigit():
             return "https://www.douyin.com/video/" + video_id
     return url
+
+
+def resolve_short_url(url):
+    """Resolve a Douyin share URL; browser collection remains the fallback."""
+    host = urlparse(url).hostname or ""
+    if "v.douyin.com" not in host:
+        return url
+    try:
+        with httpx.Client(follow_redirects=True, headers={"User-Agent": UA}, timeout=15) as client:
+            return normalize_url(str(client.get(url).url))
+    except Exception:
+        return url
 
 
 def platform(url):
@@ -199,9 +214,12 @@ class QuietLogger:
 def collect(url, folder):
     metadata = None
     warnings = []
-    if platform(url) == "抖音":
+    resolved_url = resolve_short_url(url)
+    if platform(resolved_url) == "抖音":
         try:
-            metadata = collect_douyin(url, folder)
+            metadata = collect_douyin(resolved_url, folder)
+            metadata["source_url"] = url
+            metadata["resolved_url"] = resolved_url
         except Exception:
             warnings.append(
                 "抖音页面采集未完成，已尝试下载器；如遇验证请在系统设置更新登录 Cookie"
@@ -243,6 +261,7 @@ def collect(url, folder):
         if not info:
             raise ValueError("未取得视频，请检查链接或更新平台登录 Cookie")
         metadata = clean_info(info, url)
+        metadata["resolved_url"] = resolved_url
         cover = info.get("thumbnail")
         if cover:
             try:

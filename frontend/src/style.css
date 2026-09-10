@@ -1940,6 +1940,12 @@ details[open] > summary > svg {
 .test-result {
   font-size: 12px;
   color: var(--green);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.test-result.failed {
+  color: oklch(48% 0.13 25);
 }
 .cookie-status {
   border: 1px solid var(--line);

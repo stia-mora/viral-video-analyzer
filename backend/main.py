@@ -266,6 +266,7 @@ def update_settings(data: SettingsInput, current=Depends(security.admin)):
 @app.post("/api/settings/test")
 def test_settings(current=Depends(security.admin)):
     import httpx
+    started = time.perf_counter()
 
     if store.setting("provider", "local") == "local":
         path = Path(
@@ -275,26 +276,51 @@ def test_settings(current=Depends(security.admin)):
         return {
             "ok": ok,
             "message": "本地模型文件已就绪" if ok else "本地模型尚未下载完成",
+            "kind": "local",
         }
+    base_url = store.setting("base_url").rstrip("/")
+    model = store.setting("model").strip()
+    key = store.setting("api_key")
+    if not base_url or not model:
+        return {"ok": False, "kind": "api", "message": "请先保存 API 地址和视觉模型名称"}
+
+    test_image = (
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVQIHWP4z8DwHwAFgAI/Sc4eGQAAAABJRU5ErkJggg=="
+    )
+    headers = {"Authorization": "Bearer " + key} if key else {}
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "请识别这张图片，并只回复 OK。"},
+            {"type": "image_url", "image_url": {"url": test_image}},
+        ]}],
+        "temperature": 0,
+        "max_tokens": 8,
+    }
     try:
-        headers = (
-            {"Authorization": "Bearer " + store.setting("api_key")}
-            if store.setting("api_key")
-            else {}
-        )
-        r = httpx.get(
-            store.setting("base_url").rstrip("/") + "/models",
-            headers=headers,
-            timeout=20,
-        )
-        return {
-            "ok": r.is_success,
-            "message": (
-                "模型服务连接成功" if r.is_success else f"服务返回 HTTP {r.status_code}"
-            ),
-        }
-    except Exception:
-        return {"ok": False, "message": "无法连接模型服务，请检查地址与网络"}
+        response = httpx.post(base_url + "/chat/completions", headers=headers, json=payload, timeout=45)
+    except httpx.TimeoutException:
+        return {"ok": False, "kind": "api", "message": "云端 VLM 请求超时（45 秒）"}
+    except httpx.HTTPError:
+        return {"ok": False, "kind": "api", "message": "无法连接云端 VLM，请检查地址和网络"}
+    if response.status_code in (401, 403):
+        return {"ok": False, "kind": "api", "message": "云端 VLM 鉴权失败，请检查 API Key"}
+    if response.status_code == 404:
+        return {"ok": False, "kind": "api", "message": "找不到视觉接口或模型，请检查 API 地址和模型名称"}
+    if response.status_code >= 400:
+        return {"ok": False, "kind": "api", "message": f"云端 VLM 返回 HTTP {response.status_code}"}
+    try:
+        body = response.json()
+        content = body["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = " ".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError
+    except (ValueError, KeyError, IndexError, TypeError):
+        return {"ok": False, "kind": "api", "message": "云端返回格式不是兼容的 Chat Completions 响应"}
+    elapsed = round((time.perf_counter() - started) * 1000)
+    return {"ok": True, "kind": "api", "message": f"云端 VLM 可用 · {model} · {elapsed} ms"}
 
 
 class CookiesInput(BaseModel):
