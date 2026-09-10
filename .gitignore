@@ -1,0 +1,17 @@
+.venv/
+node_modules/
+frontend/dist/
+__pycache__/
+.pytest_cache/
+data/
+.env
+*cookies*.txt
+.hf-cache/
+.npm-cache/
+outputs/
+output/
+artifacts/
+.playwright-cli/
+.clawhub/
+.clawhub_pkg/
+clawhub-*.tgz

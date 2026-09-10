@@ -1,0 +1,10 @@
+﻿{
+  "conda_env": "douyin-qwen-asr",
+  "asr_model": "Qwen/Qwen3-ASR-1.7B",
+  "forced_aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
+  "language": "Chinese",
+  "timestamps": "auto",
+  "hf_cache": ".hf-cache",
+  "obsidian_vault_path": "E:\\Obsidian-projects\\SecondBrain_Vault\\SecondBrain_Vault",
+  "obsidian_write_mode": "vault_root"
+}
