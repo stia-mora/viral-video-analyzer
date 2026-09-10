@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 import httpx
 from . import config, store
@@ -288,6 +289,54 @@ def safe_report(data, result):
     return report
 
 
+def _cloud_chat(endpoint, headers, model, content, max_tokens):
+    """Send one bounded, non-streaming request and retry transient failures."""
+    request = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    response = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=httpx.Timeout(180.0, connect=30.0)) as client:
+                response = client.post(
+                    endpoint + "/chat/completions", headers=headers, json=request
+                )
+            break
+        except (
+            httpx.RemoteProtocolError,
+            httpx.ReadError,
+            httpx.ConnectError,
+            httpx.TimeoutException,
+        ) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    if response is None:
+        raise ValueError(
+            "云端 VLM 连接中断，已自动重试 3 次仍未完成返回"
+        ) from last_error
+    if response.status_code >= 400:
+        raise ValueError(
+            f"模型服务返回 HTTP {response.status_code}，请检查地址、密钥和视觉模型名称"
+        )
+    try:
+        raw = response.json()["choices"][0]["message"]["content"]
+        if isinstance(raw, list):
+            raw = " ".join(
+                str(item.get("text", "")) for item in raw if isinstance(item, dict)
+            )
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError
+        return raw
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise ValueError("云端 VLM 返回格式不是兼容的 Chat Completions 响应") from exc
+
+
 def analyze(result, folder):
     provider = store.setting("provider", "local")
     payload = {
@@ -307,73 +356,40 @@ def analyze(result, folder):
         model = store.setting("model")
         if not endpoint or not model:
             raise ValueError("请在系统设置填写模型地址和名称")
-        content = [
-            {
-                "type": "text",
-                "text": SCHEMA
-                + "\n素材证据："
-                + json.dumps(payload, ensure_ascii=False),
-            }
-        ]
-        # Keep the API request bounded. Eight representative frames plus the
-        # aligned transcript are enough for a deep report and avoid providers
-        # closing long chunked responses before JSON is complete.
-        for frame in result.get("frames", [])[
-            :: max(1, len(result.get("frames", [])) // 8)
-        ][:8]:
-            content += [
-                {"type": "text", "text": f"画面时间 {frame['time']} 秒"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "data:image/jpeg;base64,"
-                        + base64.b64encode(
-                            (folder / frame["file"]).read_bytes()
-                        ).decode()
-                    },
-                },
-            ]
         headers = {"Authorization": "Bearer " + key} if key else {}
-        request = {
-            "model": model,
-            "messages": [{"role": "user", "content": content}],
-            "temperature": 0.2,
-            "max_tokens": 3500,
-        }
-        response = None
-        last_transport_error = None
-        for attempt in range(3):
-            try:
-                with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
-                    response = client.post(
-                        endpoint + "/chat/completions", headers=headers, json=request
-                    )
-                break
-            except (
-                httpx.RemoteProtocolError,
-                httpx.ReadError,
-                httpx.ConnectError,
-                httpx.TimeoutException,
-            ) as exc:
-                last_transport_error = exc
-                if attempt < 2:
-                    import time
-
-                    time.sleep(1.5 * (attempt + 1))
-        if response is None:
-            raise ValueError(
-                "云端 VLM 连接中断，已自动重试 3 次仍未完成返回"
-            ) from last_transport_error
-        if response.status_code >= 400:
-            raise ValueError(
-                f"模型服务返回 HTTP {response.status_code}，请检查地址、密钥和视觉模型名称"
+        visual_observations = []
+        representative_frames = result.get("frames", [])[
+            :: max(1, len(result.get("frames", [])) // 4)
+        ][:4]
+        for frame in representative_frames:
+            image = (
+                "data:image/jpeg;base64,"
+                + base64.b64encode((folder / frame["file"]).read_bytes()).decode()
             )
-        try:
-            raw = response.json()["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise ValueError(
-                "云端 VLM 返回格式不是兼容的 Chat Completions 响应"
-            ) from exc
+            observation = _cloud_chat(
+                endpoint,
+                headers,
+                model,
+                [
+                    {
+                        "type": "text",
+                        "text": "只描述这张视频画面中可见的主体、构图、字幕和情绪，不推断声音或连续动作，80字以内。",
+                    },
+                    {"type": "image_url", "image_url": {"url": image}},
+                ],
+                180,
+            )
+            visual_observations.append(
+                {"time": frame["time"], "description": observation}
+            )
+        report_evidence = {**payload, "frames": visual_observations}
+        raw = _cloud_chat(
+            endpoint,
+            headers,
+            model,
+            SCHEMA + "\n素材证据：" + json.dumps(report_evidence, ensure_ascii=False),
+            1800,
+        )
         report = safe_report(parse_report(raw), result)
         report["model"] = model
         from urllib.parse import urlparse
