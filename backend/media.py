@@ -192,11 +192,11 @@ def prepare_media(folder):
     }
 
 
-def transcript(folder, has_audio=True):
+def transcript(folder, has_audio=True, force=False):
     if not has_audio:
         return {"text": "", "segments": [], "timing": "none", "note": "原视频无音轨"}
     plain = folder / "text_plain.txt"
-    if not plain.exists() or not (folder / "asr_result.json").exists():
+    if force or not plain.exists() or not (folder / "asr_result.json").exists():
         executable = Path(config.ASR_PYTHON)
         if not executable.exists():
             raise RuntimeError(
@@ -238,6 +238,8 @@ def transcript(folder, has_audio=True):
                 "--out-dir",
                 str(staging),
                 "--timestamps",
+                "auto",
+                "--language",
                 "auto",
                 *local_models,
             ],
@@ -292,8 +294,9 @@ def transcript(folder, has_audio=True):
         "text": text,
         "segments": segments,
         "timing": "aligned" if timed else "whole_video",
+        "language": meta.get("language") or "auto",
         "note": (
-            "本地 Qwen3-ASR 转写；请核对专有名词"
+            f"本地 Qwen3-ASR 转写（识别语言：{meta.get('language') or 'auto'}）；请核对专有名词"
             if timed
             else "转写未对齐到句子，不能据此断言某句出现的秒数"
         ),

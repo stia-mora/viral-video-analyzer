@@ -5,10 +5,11 @@ import json
 import os
 import wave
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Optional
 
 import torch
 from qwen_asr import Qwen3ASRModel
+from asr_utils import group_timestamp_items
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
@@ -16,13 +17,35 @@ DEFAULT_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Transcribe audio with Qwen3-ASR-1.7B.")
-    parser.add_argument("--audio", required=True, help="Path to input audio, preferably 16 kHz mono WAV.")
-    parser.add_argument("--out-dir", required=True, help="Directory for text.txt, text_plain.txt, and asr_result.json.")
-    parser.add_argument("--model", default=DEFAULT_ASR_MODEL, help="Qwen3-ASR model name or local path.")
-    parser.add_argument("--aligner", default=DEFAULT_ALIGNER_MODEL, help="Forced aligner model name or local path.")
-    parser.add_argument("--language", default="Chinese", help="Qwen language label, e.g. Chinese, English, or auto.")
-    parser.add_argument("--timestamps", choices=("auto", "always", "off"), default="auto")
+    parser = argparse.ArgumentParser(
+        description="Transcribe audio with Qwen3-ASR-1.7B."
+    )
+    parser.add_argument(
+        "--audio",
+        required=True,
+        help="Path to input audio, preferably 16 kHz mono WAV.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        required=True,
+        help="Directory for text.txt, text_plain.txt, and asr_result.json.",
+    )
+    parser.add_argument(
+        "--model", default=DEFAULT_ASR_MODEL, help="Qwen3-ASR model name or local path."
+    )
+    parser.add_argument(
+        "--aligner",
+        default=DEFAULT_ALIGNER_MODEL,
+        help="Forced aligner model name or local path.",
+    )
+    parser.add_argument(
+        "--language",
+        default="Chinese",
+        help="Qwen language label, e.g. Chinese, English, or auto.",
+    )
+    parser.add_argument(
+        "--timestamps", choices=("auto", "always", "off"), default="auto"
+    )
     parser.add_argument("--max-new-tokens", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
@@ -59,37 +82,6 @@ def should_use_timestamps(mode: str, duration: Optional[float]) -> bool:
         return True
     # Qwen3-ForcedAligner is documented for up to 5 minutes of speech.
     return duration is not None and duration <= 300
-
-
-def group_timestamp_items(items: Iterable[object], max_chars: int = 42) -> List[str]:
-    lines: List[str] = []
-    buf: List[str] = []
-    start: Optional[float] = None
-    end: Optional[float] = None
-    hard_breaks = set("。！？!?；;\n")
-
-    for item in items:
-        text = str(getattr(item, "text", "") or "")
-        if not text:
-            continue
-        item_start = float(getattr(item, "start_time", 0.0) or 0.0)
-        item_end = float(getattr(item, "end_time", item_start) or item_start)
-        if start is None:
-            start = item_start
-        end = item_end
-        buf.append(text)
-        joined = "".join(buf).strip()
-        if joined and (joined[-1] in hard_breaks or len(joined) >= max_chars):
-            lines.append(f"[{start:.1f}s -> {end:.1f}s] {joined}")
-            buf = []
-            start = None
-            end = None
-
-    if buf and start is not None and end is not None:
-        joined = "".join(buf).strip()
-        if joined:
-            lines.append(f"[{start:.1f}s -> {end:.1f}s] {joined}")
-    return lines
 
 
 def main() -> None:
@@ -132,11 +124,15 @@ def main() -> None:
 
     timestamp_lines: List[str]
     if use_timestamps and result.time_stamps:
-        timestamp_lines = group_timestamp_items(result.time_stamps)
+        timestamp_lines = group_timestamp_items(
+            result.time_stamps, language=result.language
+        )
     else:
         end = duration if duration is not None else 0.0
         timestamp_lines = [f"[0.0s -> {end:.1f}s] {plain_text}"] if plain_text else []
-    (out_dir / "text.txt").write_text("\n".join(timestamp_lines) + "\n", encoding="utf-8")
+    (out_dir / "text.txt").write_text(
+        "\n".join(timestamp_lines) + "\n", encoding="utf-8"
+    )
 
     payload = {
         "model": args.model,
@@ -149,7 +145,9 @@ def main() -> None:
         "timestamps": use_timestamps,
         "text": plain_text,
     }
-    (out_dir / "asr_result.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out_dir / "asr_result.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     print(f"language={result.language}")
     print(f"chars={len(plain_text)}")

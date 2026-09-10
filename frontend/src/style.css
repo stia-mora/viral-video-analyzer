@@ -1947,6 +1947,7 @@ details[open] > summary > svg {
 .test-result.failed {
   color: oklch(48% 0.13 25);
 }
+.language-badge{display:inline-block;margin-left:8px;padding:2px 6px;border-radius:4px;background:var(--tint);color:var(--accent-dark);font-size:10px}
 .cookie-status {
   border: 1px solid var(--line);
   border-radius: 10px;

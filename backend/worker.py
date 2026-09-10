@@ -120,12 +120,18 @@ class Worker:
                 result.get("comments", [])
             )
             store.update(job_id, result=result, stage="transcribe")
-            if not result.get("transcript", {}).get("text") and result.get(
+            transcript_data = result.get("transcript", {})
+            refresh_transcript = bool(
+                result.get("has_audio", True)
+                and transcript_data.get("text")
+                and not transcript_data.get("language")
+            )
+            if (not transcript_data.get("text") or refresh_transcript) and result.get(
                 "has_audio", True
             ):
                 try:
                     result["transcript"] = media.transcript(
-                        folder, result.get("has_audio", True)
+                        folder, result.get("has_audio", True), force=refresh_transcript
                     )
                     result["warnings"] = [
                         w

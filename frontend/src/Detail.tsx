@@ -383,7 +383,10 @@ export default function Detail({
               <div>
                 <span className="eyebrow">COPYWRITING</span>
                 <h2>每一句话，如何推动观看</h2>
-                <p className="muted">{r.transcript?.note || "等待语音转写"}</p>
+                <p className="muted">
+                  {r.transcript?.note || "等待语音转写"}
+                  {r.transcript?.language && <span className="language-badge">{r.transcript.language}</span>}
+                </p>
               </div>
               <div className="button-row">
                 <button
@@ -575,7 +578,7 @@ export default function Detail({
                 <p className="muted">{r.comments_note}</p>
               </div>
               <span className="count-label">
-                已采集 {r.comments?.length || 0} / 总评论{" "}
+                已采集 {r.comments?.length || 0} 条公开样本 / 平台总评论{" "}
                 {count(r.metrics?.comments)}
               </span>
             </div>

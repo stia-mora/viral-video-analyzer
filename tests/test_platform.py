@@ -7,6 +7,7 @@ from backend import config, store, security
 from backend.main import app
 from backend.collector import normalize_url, clean_info
 from backend.analysis import ratios, safe_report, comment_insights
+from scripts.asr_utils import group_timestamp_items
 
 
 @pytest.fixture
@@ -176,33 +177,62 @@ def test_secrets_never_returned(client):
 
 def test_cloud_vlm_smoke_test_uses_multimodal_endpoint(client, monkeypatch):
     login(client)
-    client.put("/api/settings", json={"team_name":"团队", "provider":"api", "base_url":"https://vision.example/v1", "model":"vision-model", "api_key":"secret-test-key"})
+    client.put(
+        "/api/settings",
+        json={
+            "team_name": "团队",
+            "provider": "api",
+            "base_url": "https://vision.example/v1",
+            "model": "vision-model",
+            "api_key": "secret-test-key",
+        },
+    )
 
     class FakeResponse:
         status_code = 200
+
         def json(self):
             return {"choices": [{"message": {"content": "OK"}}]}
 
     captured = {}
+
     def fake_post(url, **kwargs):
         captured.update(url=url, **kwargs)
         return FakeResponse()
+
     monkeypatch.setattr("httpx.post", fake_post)
     response = client.post("/api/settings/test")
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["kind"] == "api"
     assert captured["url"] == "https://vision.example/v1/chat/completions"
-    assert any(item["type"] == "image_url" for item in captured["json"]["messages"][0]["content"])
+    assert any(
+        item["type"] == "image_url"
+        for item in captured["json"]["messages"][0]["content"]
+    )
     assert "secret-test-key" not in response.text
 
 
 def test_cloud_vlm_smoke_test_reports_errors(client, monkeypatch):
     login(client)
-    client.put("/api/settings", json={"team_name":"团队", "provider":"api", "base_url":"https://vision.example/v1", "model":"vision-model", "api_key":"secret-test-key"})
+    client.put(
+        "/api/settings",
+        json={
+            "team_name": "团队",
+            "provider": "api",
+            "base_url": "https://vision.example/v1",
+            "model": "vision-model",
+            "api_key": "secret-test-key",
+        },
+    )
+
     class Response:
-        def __init__(self, code, body=None): self.status_code, self.body = code, body or {}
-        def json(self): return self.body
+        def __init__(self, code, body=None):
+            self.status_code, self.body = code, body or {}
+
+        def json(self):
+            return self.body
+
     monkeypatch.setattr("httpx.post", lambda *a, **k: Response(401))
     assert "鉴权失败" in client.post("/api/settings/test").json()["message"]
     monkeypatch.setattr("httpx.post", lambda *a, **k: Response(200, {"choices": []}))
@@ -318,6 +348,18 @@ def test_report_uses_source_quote_and_intervals():
     assert report["structure"][0]["end"] == 12
 
 
+def test_english_timestamp_groups_keep_word_spaces():
+    class Word:
+        def __init__(self, text, start, end):
+            self.text, self.start_time, self.end_time = text, start, end
+
+    result = group_timestamp_items(
+        [Word("Some", 0, 0.2), Word("girls", 0.2, 0.4), Word("can", 0.4, 0.6)],
+        language="English",
+    )
+    assert result == ["[0.0s -> 0.6s] Some girls can"]
+
+
 def test_admin_can_delete_completed_job(client):
     login(client)
     ident = client.post(
@@ -333,15 +375,20 @@ def test_admin_can_delete_completed_job(client):
     assert client.get("/api/jobs/" + ident).status_code == 404
 
 
-def test_interrupted_media_keeps_last_complete_file(tmp_path,monkeypatch):
+def test_interrupted_media_keeps_last_complete_file(tmp_path, monkeypatch):
     from backend import media
-    target=tmp_path/'audio.wav'
-    target.write_bytes(b'complete audio')
-    def interrupted(args,timeout):
+
+    target = tmp_path / "audio.wav"
+    target.write_bytes(b"complete audio")
+
+    def interrupted(args, timeout):
         from pathlib import Path
-        Path(args[-1]).write_bytes(b'partial')
-        raise RuntimeError('simulated ffmpeg interruption')
-    monkeypatch.setattr(media,'run',interrupted)
-    with pytest.raises(RuntimeError):media.atomic_media(['ffmpeg'],target)
-    assert target.read_bytes()==b'complete audio'
-    assert not (tmp_path/'audio.pending.wav').exists()
+
+        Path(args[-1]).write_bytes(b"partial")
+        raise RuntimeError("simulated ffmpeg interruption")
+
+    monkeypatch.setattr(media, "run", interrupted)
+    with pytest.raises(RuntimeError):
+        media.atomic_media(["ffmpeg"], target)
+    assert target.read_bytes() == b"complete audio"
+    assert not (tmp_path / "audio.pending.wav").exists()

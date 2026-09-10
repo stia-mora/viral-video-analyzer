@@ -315,9 +315,12 @@ def analyze(result, folder):
                 + json.dumps(payload, ensure_ascii=False),
             }
         ]
+        # Keep the API request bounded. Eight representative frames plus the
+        # aligned transcript are enough for a deep report and avoid providers
+        # closing long chunked responses before JSON is complete.
         for frame in result.get("frames", [])[
-            :: max(1, len(result.get("frames", [])) // 16)
-        ][:16]:
+            :: max(1, len(result.get("frames", [])) // 8)
+        ][:8]:
             content += [
                 {"type": "text", "text": f"画面时间 {frame['time']} 秒"},
                 {
@@ -331,22 +334,46 @@ def analyze(result, folder):
                 },
             ]
         headers = {"Authorization": "Bearer " + key} if key else {}
-        with httpx.Client(timeout=240) as client:
-            response = client.post(
-                endpoint + "/chat/completions",
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": content}],
-                    "temperature": 0.2,
-                    "max_tokens": 6000,
-                },
+        request = {
+            "model": model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.2,
+            "max_tokens": 3500,
+        }
+        response = None
+        last_transport_error = None
+        for attempt in range(3):
+            try:
+                with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+                    response = client.post(
+                        endpoint + "/chat/completions", headers=headers, json=request
+                    )
+                break
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+            ) as exc:
+                last_transport_error = exc
+                if attempt < 2:
+                    import time
+
+                    time.sleep(1.5 * (attempt + 1))
+        if response is None:
+            raise ValueError(
+                "云端 VLM 连接中断，已自动重试 3 次仍未完成返回"
+            ) from last_transport_error
+        if response.status_code >= 400:
+            raise ValueError(
+                f"模型服务返回 HTTP {response.status_code}，请检查地址、密钥和视觉模型名称"
             )
-            if response.status_code >= 400:
-                raise ValueError(
-                    f"模型服务返回 HTTP {response.status_code}，请检查地址、密钥和视觉模型名称"
-                )
+        try:
             raw = response.json()["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ValueError(
+                "云端 VLM 返回格式不是兼容的 Chat Completions 响应"
+            ) from exc
         report = safe_report(parse_report(raw), result)
         report["model"] = model
         from urllib.parse import urlparse

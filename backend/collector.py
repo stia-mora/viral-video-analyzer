@@ -276,6 +276,7 @@ def collect_douyin(url, folder):
     from playwright.sync_api import sync_playwright
 
     detail, comments = {}, {}
+    comment_state = {"has_more": False}
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         context = browser.new_context(
@@ -300,6 +301,7 @@ def collect_douyin(url, folder):
                         or c.domain.endswith(".douyin.com")
                     )
                     and c.name
+                    and not c.is_expired()
                 ]
             )
         page = context.new_page()
@@ -311,7 +313,9 @@ def collect_douyin(url, folder):
                     if body:
                         detail.update(body)
                 elif "/comment/list/" in response.url:
-                    for item in response.json().get("comments") or []:
+                    body = response.json()
+                    comment_state["has_more"] = bool(body.get("has_more"))
+                    for item in body.get("comments") or []:
                         comments[str(item.get("cid"))] = {
                             "id": str(item.get("cid")),
                             "text": str(item.get("text", ""))[:4000],
@@ -358,12 +362,7 @@ def collect_douyin(url, folder):
                                 return found
 
                 detail.update(find(tree) or {})
-            for _ in range(4):
-                if len(comments) >= 100:
-                    break
-                page.mouse.move(1250, 700)
-                page.mouse.wheel(0, 700)
-                page.wait_for_timeout(800)
+            comments_require_login = _collect_visible_comments(page, comments, limit=100)
         finally:
             browser.close()
     if not detail:
@@ -403,7 +402,70 @@ def collect_douyin(url, folder):
         },
         url,
     )
-    result["comments"] = list(comments.values())[:200]
-    if comments:
-        result["comments_note"] = "页面采集的公开评论样本，不代表全部评论"
+    result["comments"] = list(comments.values())[:100]
+    if comments_require_login:
+        result["comments_note"] = (
+            f"已采集 {len(result['comments'])} 条公开评论样本。平台提示“登录后可查看更多评论”，"
+            "请在系统设置更新有效的抖音 Cookie 后重新采集。"
+        )
+    elif comments:
+        result["comments_note"] = (
+            f"页面采集的公开评论样本（{len(result['comments'])} 条），不代表全部评论"
+        )
     return result
+
+
+def _collect_visible_comments(page, comments, limit=100):
+    """Drive Douyin's paginated comment UI instead of forging signed URLs."""
+    try:
+        for label in ("评论", "展开评论"):
+            candidate = page.get_by_text(label, exact=False).first
+            if candidate.is_visible(timeout=1000):
+                candidate.click(timeout=1000)
+                page.wait_for_timeout(500)
+                break
+    except Exception:
+        pass
+
+    idle_rounds = 0
+    for _ in range(24):
+        if len(comments) >= limit or idle_rounds >= 6:
+            break
+        previous = len(comments)
+        # The platform signs cursor requests. Scroll its actual UI so the
+        # browser produces valid pagination requests; the response callback
+        # above records those public pages.
+        moved = page.evaluate(
+            """() => {
+                const all = [...document.querySelectorAll('*')];
+                const scrollable = (element) => {
+                    const style = getComputedStyle(element);
+                    return /(auto|scroll)/.test(style.overflowY)
+                        && element.scrollHeight > element.clientHeight + 80;
+                };
+                const candidates = all.filter((element) => scrollable(element)
+                    && /评论|回复/.test((element.innerText || '').slice(0, 2000)));
+                const targets = (candidates.length ? candidates : all.filter(scrollable))
+                    .sort((a, b) => b.clientHeight - a.clientHeight).slice(0, 3);
+                for (const target of targets) {
+                    target.scrollTop = target.scrollHeight;
+                    target.dispatchEvent(new Event('scroll', {bubbles: true}));
+                }
+                return targets.length;
+            }"""
+        )
+        if not moved:
+            page.mouse.wheel(0, 1000)
+        page.wait_for_timeout(1200)
+        try:
+            load_more = page.get_by_text("点击加载更多", exact=True).first
+            if load_more.is_visible(timeout=500):
+                load_more.click(timeout=1000)
+                page.wait_for_timeout(1200)
+        except Exception:
+            pass
+        idle_rounds = idle_rounds + 1 if len(comments) == previous else 0
+    try:
+        return "登录后可查看更多评论" in page.locator("body").inner_text(timeout=1000)
+    except Exception:
+        return False

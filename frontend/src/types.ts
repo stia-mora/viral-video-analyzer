@@ -75,8 +75,9 @@ export type Result = {
   transcript?: {
     text: string;
     segments: { start: number; end: number; text: string }[];
-    timing: string;
-    note: string;
+  timing: string;
+  language?: string;
+  note: string;
   };
   comments?: {
     id: string;
