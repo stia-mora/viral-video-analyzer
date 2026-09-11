@@ -3,9 +3,19 @@ import math
 import os
 import re
 import subprocess
+import wave
+import httpx
 from pathlib import Path
 from PIL import Image, ImageChops, ImageStat
 from . import config
+
+
+def wav_duration_seconds(path):
+    try:
+        with wave.open(str(path), "rb") as wav:
+            return wav.getnframes() / float(wav.getframerate())
+    except (OSError, wave.Error, ZeroDivisionError):
+        return None
 
 
 def run(args, timeout=180):
@@ -192,10 +202,79 @@ def prepare_media(folder):
     }
 
 
+def cloud_transcript(folder):
+    from . import store
+
+    endpoint = store.setting("asr_base_url", "https://api.siliconflow.cn/v1").rstrip(
+        "/"
+    )
+    model = store.setting("asr_model", "XingChenAGI/XingChenASR-V3.2-Ultra")
+    key = store.setting("asr_api_key")
+    if not key:
+        raise RuntimeError("未配置云端 ASR API Key")
+    audio = folder / "audio.wav"
+    try:
+        with audio.open("rb") as stream:
+            response = httpx.post(
+                endpoint + "/audio/transcriptions",
+                headers={"Authorization": "Bearer " + key},
+                files={"file": (audio.name, stream, "audio/wav")},
+                data={"model": model},
+                timeout=httpx.Timeout(300.0, connect=30.0),
+            )
+    except httpx.TimeoutException as exc:
+        raise RuntimeError("云端 ASR 请求超时（300 秒）") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError("云端 ASR 网络连接失败") from exc
+    if response.status_code in (401, 403):
+        raise RuntimeError("云端 ASR 鉴权失败，请检查 API Key")
+    if response.status_code >= 400:
+        raise RuntimeError(f"云端 ASR 返回 HTTP {response.status_code}，请检查模型名称")
+    try:
+        body = response.json()
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("云端 ASR 返回格式不兼容，缺少 text 字段") from exc
+    text = text.strip()
+    duration = wav_duration_seconds(audio) or 0.0
+    (folder / "text_plain.txt").write_text(text + "\n", encoding="utf-8")
+    (folder / "text.txt").write_text(
+        f"[0.0s -> {duration:.1f}s] {text}\n", encoding="utf-8"
+    )
+    (folder / "asr_result.json").write_text(
+        json.dumps(
+            {
+                "model": model,
+                "language": body.get("language", "auto"),
+                "timestamps": False,
+                "provider": "cloud",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "text": text,
+        "segments": [],
+        "timing": "whole_video",
+        "language": body.get("language", "auto"),
+        "provider": "cloud",
+        "note": f"云端 ASR 转写（{model}）；未提供句级时间戳，请核对专有名词",
+    }
+
+
 def transcript(folder, has_audio=True, force=False):
     if not has_audio:
         return {"text": "", "segments": [], "timing": "none", "note": "原视频无音轨"}
+    from . import store
+
+    if store.setting("asr_provider", "auto") == "cloud":
+        return cloud_transcript(folder)
     plain = folder / "text_plain.txt"
+    local_error = None
     if force or not plain.exists() or not (folder / "asr_result.json").exists():
         executable = Path(config.ASR_PYTHON)
         if not executable.exists():
@@ -250,11 +329,20 @@ def transcript(folder, has_audio=True, force=False):
         )
         (folder / "asr.log").write_bytes(proc.stdout + b"\n" + proc.stderr)
         if proc.returncode:
-            raise RuntimeError(
-                "本地语音转写失败，请检查 GPU 和 Qwen 模型，或在文案页手动补充逐字稿"
+            local_error = RuntimeError("本地语音转写失败，请检查 GPU 和 Qwen 模型")
+        else:
+            for name in ["text_plain.txt", "text.txt", "asr_result.json"]:
+                (staging / name).replace(folder / name)
+    if local_error or not plain.exists():
+        if store.setting("asr_provider", "auto") == "auto" and store.setting(
+            "asr_api_key"
+        ):
+            fallback = cloud_transcript(folder)
+            fallback["note"] = (
+                "本地 ASR 失败，已自动切换云端备用 ASR。" + fallback["note"]
             )
-        for name in ["text_plain.txt", "text.txt", "asr_result.json"]:
-            (staging / name).replace(folder / name)
+            return fallback
+        raise local_error or RuntimeError("本地语音转写未生成结果")
     text = plain.read_text(encoding="utf-8").strip()
     lines = (
         (folder / "text.txt").read_text(encoding="utf-8")
@@ -295,6 +383,7 @@ def transcript(folder, has_audio=True, force=False):
         "segments": segments,
         "timing": "aligned" if timed else "whole_video",
         "language": meta.get("language") or "auto",
+        "provider": meta.get("provider", "local"),
         "note": (
             f"本地 Qwen3-ASR 转写（识别语言：{meta.get('language') or 'auto'}）；请核对专有名词"
             if timed

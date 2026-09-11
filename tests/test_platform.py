@@ -239,6 +239,25 @@ def test_cloud_vlm_smoke_test_reports_errors(client, monkeypatch):
     assert "返回格式" in client.post("/api/settings/test").json()["message"]
 
 
+def test_asr_settings_do_not_return_secret(client):
+    login(client)
+    client.put(
+        "/api/settings",
+        json={
+            "team_name": "团队",
+            "provider": "local",
+            "asr_provider": "auto",
+            "asr_base_url": "https://api.siliconflow.cn/v1",
+            "asr_model": "XingChenAGI/XingChenASR-V3.2-Ultra",
+            "asr_api_key": "asr-secret-test-key",
+        },
+    )
+    response = client.get("/api/settings")
+    assert response.json()["has_asr_api_key"] is True
+    assert "asr-secret-test-key" not in response.text
+    assert store.setting("asr_api_key") == "asr-secret-test-key"
+
+
 def test_password_change_invalidates_sessions(client):
     login(client)
     assert (

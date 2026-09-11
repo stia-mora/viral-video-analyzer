@@ -82,6 +82,10 @@ class SettingsInput(BaseModel):
     base_url: str = Field(default="", max_length=500)
     model: str = Field(default="", max_length=200)
     api_key: str | None = Field(default=None, max_length=2000)
+    asr_provider: str = "auto"
+    asr_base_url: str = Field(default="https://api.siliconflow.cn/v1", max_length=500)
+    asr_model: str = Field(default="XingChenAGI/XingChenASR-V3.2-Ultra", max_length=200)
+    asr_api_key: str | None = Field(default=None, max_length=2000)
 
 
 def get_job(job_id):
@@ -223,6 +227,10 @@ def settings(current=Depends(security.admin)):
         "base_url": s.get("base_url", ""),
         "model": s.get("model", ""),
         "has_api_key": bool(s.get("api_key")),
+        "asr_provider": s.get("asr_provider", "auto"),
+        "asr_base_url": s.get("asr_base_url", "https://api.siliconflow.cn/v1"),
+        "asr_model": s.get("asr_model", "XingChenAGI/XingChenASR-V3.2-Ultra"),
+        "has_asr_api_key": bool(s.get("asr_api_key")),
         "local_model": "Qwen3-VL-2B-Instruct",
         "cookies": {
             p: bool(collector.cookie_path(url))
@@ -258,6 +266,25 @@ def update_settings(data: SettingsInput, current=Depends(security.admin)):
             "::1",
         ):
             raise HTTPException(400, "远程模型地址必须使用 HTTPS")
+    if data.asr_provider not in ("auto", "local", "cloud"):
+        raise HTTPException(400, "ASR 模式无效")
+    if data.asr_base_url:
+        asr_url = urlparse(data.asr_base_url)
+        if (
+            asr_url.scheme not in ("https", "http")
+            or not asr_url.hostname
+            or asr_url.username
+            or asr_url.password
+            or asr_url.query
+            or asr_url.fragment
+        ):
+            raise HTTPException(400, "ASR 地址需为 HTTP(S) API 根地址")
+        if asr_url.scheme == "http" and asr_url.hostname not in (
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        ):
+            raise HTTPException(400, "远程 ASR 地址必须使用 HTTPS")
     values = data.model_dump(exclude_none=True)
     store.save_settings(values)
     return {"ok": True}
@@ -266,6 +293,7 @@ def update_settings(data: SettingsInput, current=Depends(security.admin)):
 @app.post("/api/settings/test")
 def test_settings(current=Depends(security.admin)):
     import httpx
+
     started = time.perf_counter()
 
     if store.setting("provider", "local") == "local":
@@ -282,7 +310,11 @@ def test_settings(current=Depends(security.admin)):
     model = store.setting("model").strip()
     key = store.setting("api_key")
     if not base_url or not model:
-        return {"ok": False, "kind": "api", "message": "请先保存 API 地址和视觉模型名称"}
+        return {
+            "ok": False,
+            "kind": "api",
+            "message": "请先保存 API 地址和视觉模型名称",
+        }
 
     test_image = (
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
@@ -291,36 +323,139 @@ def test_settings(current=Depends(security.admin)):
     headers = {"Authorization": "Bearer " + key} if key else {}
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": "请识别这张图片，并只回复 OK。"},
-            {"type": "image_url", "image_url": {"url": test_image}},
-        ]}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请识别这张图片，并只回复 OK。"},
+                    {"type": "image_url", "image_url": {"url": test_image}},
+                ],
+            }
+        ],
         "temperature": 0,
         "max_tokens": 8,
     }
     try:
-        response = httpx.post(base_url + "/chat/completions", headers=headers, json=payload, timeout=45)
+        response = httpx.post(
+            base_url + "/chat/completions", headers=headers, json=payload, timeout=45
+        )
     except httpx.TimeoutException:
         return {"ok": False, "kind": "api", "message": "云端 VLM 请求超时（45 秒）"}
     except httpx.HTTPError:
-        return {"ok": False, "kind": "api", "message": "无法连接云端 VLM，请检查地址和网络"}
+        return {
+            "ok": False,
+            "kind": "api",
+            "message": "无法连接云端 VLM，请检查地址和网络",
+        }
     if response.status_code in (401, 403):
-        return {"ok": False, "kind": "api", "message": "云端 VLM 鉴权失败，请检查 API Key"}
+        return {
+            "ok": False,
+            "kind": "api",
+            "message": "云端 VLM 鉴权失败，请检查 API Key",
+        }
     if response.status_code == 404:
-        return {"ok": False, "kind": "api", "message": "找不到视觉接口或模型，请检查 API 地址和模型名称"}
+        return {
+            "ok": False,
+            "kind": "api",
+            "message": "找不到视觉接口或模型，请检查 API 地址和模型名称",
+        }
     if response.status_code >= 400:
-        return {"ok": False, "kind": "api", "message": f"云端 VLM 返回 HTTP {response.status_code}"}
+        return {
+            "ok": False,
+            "kind": "api",
+            "message": f"云端 VLM 返回 HTTP {response.status_code}",
+        }
     try:
         body = response.json()
         content = body["choices"][0]["message"]["content"]
         if isinstance(content, list):
-            content = " ".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
+            content = " ".join(
+                str(item.get("text", "")) for item in content if isinstance(item, dict)
+            )
         if not isinstance(content, str) or not content.strip():
             raise ValueError
     except (ValueError, KeyError, IndexError, TypeError):
-        return {"ok": False, "kind": "api", "message": "云端返回格式不是兼容的 Chat Completions 响应"}
+        return {
+            "ok": False,
+            "kind": "api",
+            "message": "云端返回格式不是兼容的 Chat Completions 响应",
+        }
     elapsed = round((time.perf_counter() - started) * 1000)
-    return {"ok": True, "kind": "api", "message": f"云端 VLM 可用 · {model} · {elapsed} ms"}
+    return {
+        "ok": True,
+        "kind": "api",
+        "message": f"云端 VLM 可用 · {model} · {elapsed} ms",
+    }
+
+
+@app.post("/api/settings/test-asr")
+def test_asr_settings(current=Depends(security.admin)):
+    """Test the configured cloud ASR with a tiny generated WAV file."""
+    import io, wave, httpx
+
+    mode = store.setting("asr_provider", "auto")
+    if mode == "local":
+        return {
+            "ok": Path(config.ASR_PYTHON).exists(),
+            "kind": "local",
+            "message": (
+                "本地 ASR 环境已找到"
+                if Path(config.ASR_PYTHON).exists()
+                else "本地 ASR 环境不存在"
+            ),
+        }
+    endpoint = store.setting("asr_base_url", "https://api.siliconflow.cn/v1").rstrip(
+        "/"
+    )
+    model = store.setting("asr_model", "XingChenAGI/XingChenASR-V3.2-Ultra")
+    key = store.setting("asr_api_key")
+    if not key:
+        return {"ok": False, "kind": "cloud", "message": "请先保存云端 ASR API Key"}
+    audio = io.BytesIO()
+    with wave.open(audio, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\0\0" * 1600)
+    try:
+        response = httpx.post(
+            endpoint + "/audio/transcriptions",
+            headers={"Authorization": "Bearer " + key},
+            files={"file": ("test.wav", audio.getvalue(), "audio/wav")},
+            data={"model": model},
+            timeout=httpx.Timeout(90, connect=20),
+        )
+    except httpx.TimeoutException:
+        return {"ok": False, "kind": "cloud", "message": "云端 ASR 请求超时（90 秒）"}
+    except httpx.HTTPError:
+        return {
+            "ok": False,
+            "kind": "cloud",
+            "message": "无法连接云端 ASR，请检查地址和网络",
+        }
+    if response.status_code in (401, 403):
+        return {
+            "ok": False,
+            "kind": "cloud",
+            "message": "云端 ASR 鉴权失败，请检查 API Key",
+        }
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "kind": "cloud",
+            "message": f"云端 ASR 返回 HTTP {response.status_code}，请检查模型名称",
+        }
+    try:
+        body = response.json()
+        if not isinstance(body, dict) or not isinstance(body.get("text"), str):
+            raise ValueError
+    except (ValueError, TypeError):
+        return {
+            "ok": False,
+            "kind": "cloud",
+            "message": "云端 ASR 返回格式不兼容，缺少 text 字段",
+        }
+    return {"ok": True, "kind": "cloud", "message": f"云端 ASR 可用 · {model}"}
 
 
 class CookiesInput(BaseModel):

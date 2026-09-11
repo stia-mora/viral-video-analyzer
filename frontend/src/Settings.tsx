@@ -21,6 +21,10 @@ type Config = {
   has_api_key: boolean;
   local_model: string;
   cookies: Record<string, boolean>;
+  asr_provider: string;
+  asr_base_url: string;
+  asr_model: string;
+  has_asr_api_key: boolean;
 };
 export default function Settings({
   user,
@@ -35,7 +39,11 @@ export default function Settings({
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [key, setKey] = useState(""),
+    [asrKey, setAsrKey] = useState(""),
     [test, setTest] = useState<{ ok: boolean; message: string } | null>(null),
+    [asrTest, setAsrTest] = useState<{ ok: boolean; message: string } | null>(
+      null,
+    ),
     [cookie, setCookie] = useState(""),
     [platform, setPlatform] = useState("抖音");
   useEffect(() => {
@@ -58,9 +66,14 @@ export default function Settings({
           base_url: config.base_url,
           model: config.model,
           api_key: key || undefined,
+          asr_provider: config.asr_provider,
+          asr_base_url: config.asr_base_url,
+          asr_model: config.asr_model,
+          asr_api_key: asrKey || undefined,
         }),
       });
       setKey("");
+      setAsrKey("");
       notify("团队设置已保存");
       refreshUser();
     } catch (e) {
@@ -98,6 +111,105 @@ export default function Settings({
         <ShieldCheck className="heading-icon" size={36} />
       </div>
       <ErrorNotice message={error} />
+      {config && (
+        <form className="settings-section" onSubmit={save}>
+          <div className="settings-label">
+            <h2>语音转录</h2>
+            <p>本地 Qwen ASR 优先；本地失败时可自动切换云端备用模型。</p>
+          </div>
+          <div className="settings-fields">
+            <div className="provider-options">
+              {[
+                ["auto", "本地优先 + 云端备用", "本地失败自动上传音频"],
+                ["local", "仅本地 ASR", "音频不离开服务器"],
+                ["cloud", "仅云端 ASR", "直接使用备用模型"],
+              ].map(([value, title, desc]) => (
+                <button
+                  type="button"
+                  key={value}
+                  onClick={() => setConfig({ ...config, asr_provider: value })}
+                  className={config.asr_provider === value ? "selected" : ""}
+                >
+                  <Server size={20} />
+                  <strong>{title}</strong>
+                  <span>{desc}</span>
+                  {config.asr_provider === value && <Check size={16} />}
+                </button>
+              ))}
+            </div>
+            {config.asr_provider !== "local" && (
+              <>
+                <label>
+                  ASR API 地址
+                  <input
+                    value={config.asr_base_url}
+                    required
+                    onChange={(e) =>
+                      setConfig({ ...config, asr_base_url: e.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  ASR 模型名称
+                  <input
+                    value={config.asr_model}
+                    required
+                    onChange={(e) =>
+                      setConfig({ ...config, asr_model: e.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  ASR API Key
+                  <input
+                    type="password"
+                    value={asrKey}
+                    placeholder={
+                      config.has_asr_api_key
+                        ? "已保存密钥；留空保留"
+                        : "输入云端 ASR Key"
+                    }
+                    onChange={(e) => setAsrKey(e.target.value)}
+                  />
+                </label>
+              </>
+            )}
+            <div className="button-row">
+              <button className="primary" type="submit" disabled={busy}>
+                <Save size={16} />
+                保存 ASR 设置
+              </button>
+              <button
+                className="secondary"
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    setAsrTest(await post("/settings/test-asr"));
+                  } catch (e) {
+                    setError((e as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                <FlaskConical size={16} />
+                测试云端 ASR
+              </button>
+            </div>
+            {asrTest && (
+              <p
+                className={`test-result ${asrTest.ok ? "ok" : "failed"}`}
+                role="status"
+              >
+                {asrTest.ok ? <Check size={14} /> : null}
+                {asrTest.message}
+              </p>
+            )}
+          </div>
+        </form>
+      )}
       {config && (
         <form onSubmit={save}>
           <section className="settings-section">
@@ -229,7 +341,10 @@ export default function Settings({
                 </button>
               </div>
               {test && (
-                <p className={`test-result ${test.ok ? "ok" : "failed"}`} role="status">
+                <p
+                  className={`test-result ${test.ok ? "ok" : "failed"}`}
+                  role="status"
+                >
                   {test.ok ? <Check size={14} /> : null}
                   {test.message}
                 </p>
